@@ -1,0 +1,37 @@
+{
+  "title": "Iceberg Table Metrics",
+  "uid": "iceberg_metrics",
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Total Records",
+      "targets": [{"expr": "iceberg_snapshot_total_records", "refId": "A"}],
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "datasource": {"uid": "Prometheus"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Total Data Files",
+      "targets": [{"expr": "iceberg_snapshot_total_data_files", "refId": "A"}],
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "datasource": {"uid": "Prometheus"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Added Data Files",
+      "targets": [{"expr": "iceberg_snapshot_added_data_files", "refId": "A"}],
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "datasource": {"uid": "Prometheus"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Average File Size (Bytes)",
+      "targets": [{"expr": "iceberg_files_avg_file_size", "refId": "A"}],
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "datasource": {"uid": "Prometheus"}
+    }
+  ]
+}
