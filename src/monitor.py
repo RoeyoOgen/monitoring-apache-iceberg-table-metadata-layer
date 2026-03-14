@@ -15,7 +15,14 @@ SNAPSHOT_METRICS = {
     'total_delete_files': Gauge('iceberg_snapshot_total_delete_files', 'Total delete files', ['table_name']),
     'added_files_size': Gauge('iceberg_snapshot_added_files_size', 'Added files size', ['table_name']),
     'total_files_size': Gauge('iceberg_snapshot_total_files_size', 'Total files size', ['table_name']),
-    'added_position_deletes': Gauge('iceberg_snapshot_added_position_deletes', 'Added position deletes', ['table_name'])
+    'added_position_deletes': Gauge('iceberg_snapshot_added_position_deletes', 'Added position deletes', ['table_name']),
+    'changed_partition_count': Gauge('iceberg_snapshot_changed_partition_count', 'Changed partition count', ['table_name']),
+}
+
+# Define Maintenance Metrics (mapped from summary or simulated for demo)
+MAINTENANCE_METRICS = {
+    'compacted_data_files': Gauge('iceberg_maintenance_compacted_data_files', 'Number of files compacted', ['table_name']),
+    'compacted_files_size': Gauge('iceberg_maintenance_compacted_files_size', 'Size of files compacted', ['table_name']),
 }
 
 # Define File Metrics
@@ -26,6 +33,21 @@ FILE_METRICS = {
     'avg_file_size': Gauge('iceberg_files_avg_file_size', 'Avg file size', ['table_name']),
     'max_file_size': Gauge('iceberg_files_max_file_size', 'Max file size', ['table_name']),
     'min_file_size': Gauge('iceberg_files_min_file_size', 'Min file size', ['table_name']),
+}
+
+# Define Partition Metrics
+PARTITION_SUMMARY_METRICS = {
+    'min_record_count': Gauge('iceberg_partitions_min_record_count', 'Min record count in partitions', ['table_name']),
+    'max_record_count': Gauge('iceberg_partitions_max_record_count', 'Max record count in partitions', ['table_name']),
+    'avg_record_count': Gauge('iceberg_partitions_avg_record_count', 'Avg record count in partitions', ['table_name']),
+    'min_file_count': Gauge('iceberg_partitions_min_file_count', 'Min file count in partitions', ['table_name']),
+    'max_file_count': Gauge('iceberg_partitions_max_file_count', 'Max file count in partitions', ['table_name']),
+    'avg_file_count': Gauge('iceberg_partitions_avg_file_count', 'Avg file count in partitions', ['table_name']),
+}
+
+PARTITION_DETAIL_METRICS = {
+    'record_count': Gauge('iceberg_partition_record_count', 'Record count per partition', ['table_name', 'partition_name']),
+    'file_count': Gauge('iceberg_partition_file_count', 'File count per partition', ['table_name', 'partition_name']),
 }
 
 def safe_float(val, default=0.0):
@@ -90,29 +112,51 @@ def update_metrics():
                         summary_key = metric_key.replace('_', '-')
                         val = snapshot.summary.get(summary_key, 0)
                         gauge.labels(table_name=table_name).set(safe_float(val))
+                    
+                    # Maintenance metrics from rewrite_data_files
+                    compacted_files = snapshot.summary.get('removed-data-files', 0)
+                    MAINTENANCE_METRICS['compacted_data_files'].labels(table_name=table_name).set(safe_float(compacted_files))
+                    # Note: summary might not have 'removed-files-size', we use added-files-size as proxy if it's a rewrite
+                    if snapshot.summary.get('operation') == 'replace':
+                         MAINTENANCE_METRICS['compacted_files_size'].labels(table_name=table_name).set(safe_float(snapshot.summary.get('added-files-size', 0)))
                 else:
                     logger.info(f"No current snapshot found for {table_name}")
                         
-                # File metrics via pyiceberg inspect (req pyiceberg >= 0.6.0)
+                # File and Partition metrics via pyiceberg inspect
                 try:
-                    logger.info(f"Checking inspect for {table_name}")
                     if hasattr(table, 'inspect'):
-                        logger.info(f"Table {table_name} has inspect. Checking for files()")
+                        # Files
                         files_df = table.inspect.files().to_pandas()
                         if not files_df.empty:
-                            logger.info(f"Updating file metrics for {table_name} ({len(files_df)} files)")
+                            logger.info(f"Updating file metrics for {table_name}")
                             FILE_METRICS['avg_record_count'].labels(table_name=table_name).set(safe_float(files_df['record_count'].mean()))
                             FILE_METRICS['max_record_count'].labels(table_name=table_name).set(safe_float(files_df['record_count'].max()))
                             FILE_METRICS['min_record_count'].labels(table_name=table_name).set(safe_float(files_df['record_count'].min()))
                             FILE_METRICS['avg_file_size'].labels(table_name=table_name).set(safe_float(files_df['file_size_in_bytes'].mean()))
                             FILE_METRICS['max_file_size'].labels(table_name=table_name).set(safe_float(files_df['file_size_in_bytes'].max()))
                             FILE_METRICS['min_file_size'].labels(table_name=table_name).set(safe_float(files_df['file_size_in_bytes'].min()))
-                        else:
-                            logger.warning(f"No data files found for table {table_name}")
-                    else:
-                        logger.error(f"Table {table_name} does NOT have inspect attribute. PyIceberg version: {pyiceberg.__version__}")
+                        
+                        # Partitions
+                        partitions_df = table.inspect.partitions().to_pandas()
+                        if not partitions_df.empty:
+                            logger.info(f"Updating partition metrics for {table_name}")
+                            PARTITION_SUMMARY_METRICS['avg_record_count'].labels(table_name=table_name).set(safe_float(partitions_df['record_count'].mean()))
+                            PARTITION_SUMMARY_METRICS['max_record_count'].labels(table_name=table_name).set(safe_float(partitions_df['record_count'].max()))
+                            PARTITION_SUMMARY_METRICS['min_record_count'].labels(table_name=table_name).set(safe_float(partitions_df['record_count'].min()))
+                            PARTITION_SUMMARY_METRICS['avg_file_count'].labels(table_name=table_name).set(safe_float(partitions_df['file_count'].mean()))
+                            PARTITION_SUMMARY_METRICS['max_file_count'].labels(table_name=table_name).set(safe_float(partitions_df['file_count'].max()))
+                            PARTITION_SUMMARY_METRICS['min_file_count'].labels(table_name=table_name).set(safe_float(partitions_df['file_count'].min()))
+                            
+                            # Detailed partition metrics (limited to avoid too many series)
+                            for _, row in partitions_df.sort_values('record_count', ascending=False).head(20).iterrows():
+                                p_name = str(row['partition'])
+                                PARTITION_DETAIL_METRICS['record_count'].labels(table_name=table_name, partition_name=p_name).set(safe_float(row['record_count']))
+                                PARTITION_DETAIL_METRICS['file_count'].labels(table_name=table_name, partition_name=p_name).set(safe_float(row['file_count']))
                 except Exception as e:
-                    logger.error(f"Could not inspect files for {table_name}: {e}")
+                    logger.error(f"Could not inspect table {table_name}: {e}")
+                    
+    except Exception as e:
+        logger.error(f"Error updating metrics: {e}")
                     
     except Exception as e:
         logger.error(f"Error updating metrics: {e}")
