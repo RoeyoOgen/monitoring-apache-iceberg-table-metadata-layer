@@ -126,13 +126,7 @@ def main():
                 run_trino_query(trino_cur, query)
                 logger.info(f"Deleted records from category {cat_to_delete} via Trino.")
 
-            # 3. Occasional Compaction (every 7 iterations)
-            if iteration > 0 and iteration % 7 == 0:
-                query = "ALTER TABLE iceberg.demo.events EXECUTE rewrite_data_files"
-                run_trino_query(trino_cur, query)
-                logger.info("Executed data file rewriting (compaction) via Trino.")
-
-            # 4. Occasional Snapshot Expiration (every 10 iterations)
+            # 3. Occasional Snapshot Expiration (every 10 iterations)
             if iteration > 0 and iteration % 10 == 0:
                 # Expire snapshots older than 1 minute for the demo
                 query = "ALTER TABLE iceberg.demo.events EXECUTE expire_snapshots(retention_threshold => '1m')"

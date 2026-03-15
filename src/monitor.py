@@ -50,6 +50,13 @@ PARTITION_DETAIL_METRICS = {
     'file_count': Gauge('iceberg_partition_file_count', 'File count per partition', ['table_name', 'partition_name']),
 }
 
+# Track state between polls to make maintenance metrics cumulative
+SNAPSHOT_STATE = {} # table_name -> last_seen_snapshot_id
+MAINTENANCE_TOTALS = {
+    'compacted_data_files': {}, # table_name -> total_count
+    'compacted_files_size': {}, # table_name -> total_size
+}
+
 def safe_float(val, default=0.0):
     if val is None:
         return default
@@ -101,35 +108,60 @@ def update_metrics():
                 
                 logger.info(f"Processing table {table_name}")
                 
-                table = catalog.load_table(table_identifier)
-                logger.info(f"Loaded table {table_name}")
-                
-                # Initialize labels to avoid 'no data' in Grafana
+                # Initialize state for new tables
+                if table_name not in MAINTENANCE_TOTALS['compacted_data_files']:
+                    MAINTENANCE_TOTALS['compacted_data_files'][table_name] = 0.0
+                    MAINTENANCE_TOTALS['compacted_files_size'][table_name] = 0.0
+                    MAINTENANCE_METRICS['compacted_data_files'].labels(table_name=table_name).set(0)
+                    MAINTENANCE_METRICS['compacted_files_size'].labels(table_name=table_name).set(0)
+
+                # Initialize Snapshot Gauges to 0 (current state)
                 for gauge in SNAPSHOT_METRICS.values():
                     gauge.labels(table_name=table_name).set(0)
-                for gauge in MAINTENANCE_METRICS.values():
-                    gauge.labels(table_name=table_name).set(0)
+                
+                # Explicitly reload to get latest metadata
+                table = catalog.load_table(table_identifier)
                 
                 # Snapshot metrics
-                snapshot = table.current_snapshot()
-                if snapshot and snapshot.summary:
-                    logger.info(f"Snapshot summary for {table_name}: {snapshot.summary}")
-                    for metric_key, gauge in SNAPSHOT_METRICS.items():
-                        summary_key = metric_key.replace('_', '-')
-                        val = snapshot.summary.get(summary_key, 0)
-                        gauge.labels(table_name=table_name).set(safe_float(val))
-                    
-                    # Maintenance metrics from rewrite_data_files
-                    compacted_files = snapshot.summary.get('removed-data-files', 0)
-                    MAINTENANCE_METRICS['compacted_data_files'].labels(table_name=table_name).set(safe_float(compacted_files))
-                    
-                    # Check multiple common keys for compaction size
-                    if snapshot.summary.get('operation') in ['replace', 'delete', 'overwrite']:
-                         # removed-files-size is most accurate for "what was compacted/cleaned"
-                         size = snapshot.summary.get('removed-files-size') or snapshot.summary.get('added-files-size') or snapshot.summary.get('total-files-size') or 0
-                         MAINTENANCE_METRICS['compacted_files_size'].labels(table_name=table_name).set(safe_float(size))
-                else:
-                    logger.info(f"No current snapshot found for {table_name}")
+                try:
+                    snapshot = table.current_snapshot()
+                    if snapshot:
+                        summary = snapshot.summary
+                        op_str = str(summary.get('operation', 'unknown')).lower()
+                        
+                        # Only process maintenance if it's a NEW snapshot
+                        last_id = SNAPSHOT_STATE.get(table_name)
+                        if last_id != snapshot.snapshot_id:
+                            logger.info(f"New snapshot detected for {table_name}: {snapshot.snapshot_id} (Op: {op_str})")
+                            
+                            # Increment maintenance totals if applicable
+                            compact_files = safe_float(summary.get('removed-data-files') or summary.get('deleted-data-files') or 0)
+                            
+                            is_maint = 'replace' in op_str or 'overwrite' in op_str or 'delete' in op_str
+                            size = 0.0
+                            if is_maint:
+                                size = safe_float(summary.get('removed-files-size') or summary.get('deleted-files-size') or summary.get('added-files-size') or 0)
+                            
+                            if compact_files > 0 or size > 0:
+                                MAINTENANCE_TOTALS['compacted_data_files'][table_name] += compact_files
+                                MAINTENANCE_TOTALS['compacted_files_size'][table_name] += size
+                                logger.info(f"UPDATED MAINTENANCE TOTALS for {table_name}: +{compact_files} files, +{size} bytes")
+                            
+                            SNAPSHOT_STATE[table_name] = snapshot.snapshot_id
+                        
+                        # Always set current snapshot metrics
+                        for metric_key, gauge in SNAPSHOT_METRICS.items():
+                            summary_key = metric_key.replace('_', '-')
+                            val = summary.get(summary_key, 0)
+                            gauge.labels(table_name=table_name).set(safe_float(val))
+                        
+                        # Always set the cumulative maintenance gauges
+                        MAINTENANCE_METRICS['compacted_data_files'].labels(table_name=table_name).set(MAINTENANCE_TOTALS['compacted_data_files'][table_name])
+                        MAINTENANCE_METRICS['compacted_files_size'].labels(table_name=table_name).set(MAINTENANCE_TOTALS['compacted_files_size'][table_name])
+                    else:
+                        logger.info(f"No snapshots found for {table_name}")
+                except Exception as e:
+                    logger.error(f"Error updating snapshot metrics for {table_name}: {e}")
                         
                 # File and Partition metrics via pyiceberg inspect
                 try:
@@ -165,7 +197,4 @@ def update_metrics():
                     logger.error(f"Could not inspect table {table_name}: {e}")
                     
     except Exception as e:
-        logger.error(f"Error updating metrics: {e}")
-                    
-    except Exception as e:
-        logger.error(f"Error updating metrics: {e}")
+        logger.error(f"Error in update_metrics: {e}")
