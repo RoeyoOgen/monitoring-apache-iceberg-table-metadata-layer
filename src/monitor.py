@@ -104,10 +104,16 @@ def update_metrics():
                 table = catalog.load_table(table_identifier)
                 logger.info(f"Loaded table {table_name}")
                 
+                # Initialize labels to avoid 'no data' in Grafana
+                for gauge in SNAPSHOT_METRICS.values():
+                    gauge.labels(table_name=table_name).set(0)
+                for gauge in MAINTENANCE_METRICS.values():
+                    gauge.labels(table_name=table_name).set(0)
+                
                 # Snapshot metrics
                 snapshot = table.current_snapshot()
                 if snapshot and snapshot.summary:
-                    logger.info(f"Updating snapshot metrics for {table_name}")
+                    logger.info(f"Snapshot summary for {table_name}: {snapshot.summary}")
                     for metric_key, gauge in SNAPSHOT_METRICS.items():
                         summary_key = metric_key.replace('_', '-')
                         val = snapshot.summary.get(summary_key, 0)
@@ -116,9 +122,12 @@ def update_metrics():
                     # Maintenance metrics from rewrite_data_files
                     compacted_files = snapshot.summary.get('removed-data-files', 0)
                     MAINTENANCE_METRICS['compacted_data_files'].labels(table_name=table_name).set(safe_float(compacted_files))
-                    # Note: summary might not have 'removed-files-size', we use added-files-size as proxy if it's a rewrite
-                    if snapshot.summary.get('operation') == 'replace':
-                         MAINTENANCE_METRICS['compacted_files_size'].labels(table_name=table_name).set(safe_float(snapshot.summary.get('added-files-size', 0)))
+                    
+                    # Check multiple common keys for compaction size
+                    if snapshot.summary.get('operation') in ['replace', 'delete', 'overwrite']:
+                         # removed-files-size is most accurate for "what was compacted/cleaned"
+                         size = snapshot.summary.get('removed-files-size') or snapshot.summary.get('added-files-size') or snapshot.summary.get('total-files-size') or 0
+                         MAINTENANCE_METRICS['compacted_files_size'].labels(table_name=table_name).set(safe_float(size))
                 else:
                     logger.info(f"No current snapshot found for {table_name}")
                         

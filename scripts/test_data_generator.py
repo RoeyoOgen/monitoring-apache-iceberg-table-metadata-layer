@@ -68,14 +68,14 @@ def main():
         PartitionField(source_id=3, field_id=1000, transform=IdentityTransform(), name="category")
     )
 
-    try:
-        catalog.drop_table("demo.events")
-        logger.info("Dropped existing table 'demo.events' for clean state.")
-    except Exception:
-        pass
+    # try:
+    #     catalog.drop_table("demo.events")
+    #     logger.info("Dropped existing table 'demo.events' for clean state.")
+    # except Exception:
+    #     pass
 
     try:
-        table = catalog.create_table("demo.events", schema=iceberg_schema, partition_spec=partition_spec)
+        table = catalog.create_table_if_not_exists("demo.events", schema=iceberg_schema, partition_spec=partition_spec)
         logger.info("Created partitioned table 'demo.events'")
     except Exception as e:
         logger.error(f"Failed to create table: {e}")
@@ -110,8 +110,14 @@ def main():
             cats = [random.choice(categories) for _ in range(batch_size)]
             
             df = pa.Table.from_arrays([ids, data, cats], schema=pa_schema)
-            table.append(df)
-            logger.info(f"Appended {batch_size} records to demo.events across random partitions.")
+            try:
+                table.append(df)
+                logger.info(f"Appended {batch_size} records to demo.events across random partitions.")
+            except Exception as e:
+                if "CommitFailedException" in str(e):
+                    logger.warning(f"Commit conflict detected at iteration {iteration}. Skipping this batch.")
+                else:
+                    logger.error(f"Append failed: {e}")
             
             # 2. Occasional Deletes (every 5 iterations)
             if iteration > 0 and iteration % 5 == 0:
@@ -133,8 +139,26 @@ def main():
                 run_trino_query(trino_cur, query)
                 logger.info("Executed snapshot expiration via Trino.")
 
+            # 5. Occasional Orphan File Removal (every 12 iterations)
+            if iteration > 0 and iteration % 12 == 0:
+                query = "ALTER TABLE iceberg.demo.events EXECUTE remove_orphan_files(retention_threshold => '1m')"
+                run_trino_query(trino_cur, query)
+                logger.info("Executed orphan file removal via Trino.")
+
+            # 6. Occasional Manifest Rewriting (every 15 iterations)
+            if iteration > 0 and iteration % 15 == 0:
+                query = "ALTER TABLE iceberg.demo.events EXECUTE rewrite_manifests"
+                run_trino_query(trino_cur, query)
+                logger.info("Executed manifest rewriting via Trino.")
+
+            # 7. General Table Optimization (every 18 iterations)
+            if iteration > 0 and iteration % 18 == 0:
+                query = "ALTER TABLE iceberg.demo.events EXECUTE optimize"
+                run_trino_query(trino_cur, query)
+                logger.info("Executed general table optimization via Trino.")
+
             if iteration < max_iterations - 1:
-                time.sleep(10)
+                time.sleep(15)
                 
         logger.info("Enhanced data generation completed successfully.")
     except KeyboardInterrupt:
